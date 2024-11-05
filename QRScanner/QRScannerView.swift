@@ -5,27 +5,33 @@ import AVFoundation
 // https://www.createwithswift.com/reading-qr-codes-and-barcodes-with-the-vision-framework/
 // https://konradpiekos93.medium.com/detect-when-the-views-frame-changes-f8428f3421a5
 
-enum ScanningError: Error, Equatable {
-    case captureDeviceError
+enum ScanningError: Error {
+    case cameraAccessError
+    case captureDeviceError(Error)
 }
 
 enum ScanningState: Equatable {
     case undetermined
-    case loaded(String)
-    case error(ScanningError)
+    case scanning
+    case scannedQr(String)
+    case error(String)
+    case unknownQr
 }
 
-class ResizableView: UIView {
-    private weak var delegate: AVCaptureMetadataOutputObjectsDelegate?
-    private let objectTypes: [AVMetadataObject.ObjectType]
+class QRScannerRepresentableView: UIView {
+    private var isValid: (String) -> Bool
     private var captureSession: AVCaptureSession?
+    private let objectTypes: [AVMetadataObject.ObjectType]
+    private let result: (ScanningState) -> Void
     
     init(
         objectTypes: [AVMetadataObject.ObjectType],
-        delegate: AVCaptureMetadataOutputObjectsDelegate?
+        isValid: @escaping (String) -> Bool,
+        result: @escaping (ScanningState) -> Void
     ) {
         self.objectTypes = objectTypes
-        self.delegate = delegate
+        self.isValid = isValid
+        self.result = result
         super.init(frame: .zero)
     }
 
@@ -37,27 +43,33 @@ class ResizableView: UIView {
         super.layoutSubviews()
         if let layer = layer.sublayers?.first(where: { $0 is AVCaptureVideoPreviewLayer }) {
             layer.frame = bounds
-            print("GRADIENT FRAME", layer.frame)
+//            print("GRADIENT FRAME", layer.frame)
         }
         setNeedsDisplay()
         
-        print("Controller FRAME:", frame)
-        print("Controller BOUNDS:", bounds)
-        print("Controller PREFERRED SIZE:", layer.preferredFrameSize())
+//        print("Controller FRAME:", frame)
+//        print("Controller BOUNDS:", bounds)
+//        print("Controller PREFERRED SIZE:", layer.preferredFrameSize())
     }
 
     func setupSession() throws(ScanningError) {
         // Get an instance of the AVCaptureDeviceInput class using the previous device object.
-        guard
-            let videoCaptureDevice = AVCaptureDevice.default(
+        guard let videoCaptureDevice = AVCaptureDevice.default(
                 .builtInWideAngleCamera,
                 for: .video,
                 position: .back
-            ),
-            let videoInput = try? AVCaptureDeviceInput(device: videoCaptureDevice)
-        else {
-            throw ScanningError.captureDeviceError
+            )
+        else { throw ScanningError.cameraAccessError }
+        
+        do {
+            self.captureSession = try createSession(from: videoCaptureDevice)
+        } catch {
+            throw ScanningError.captureDeviceError(error)
         }
+    }
+    
+    private func createSession(from device: AVCaptureDevice) throws -> AVCaptureSession {
+        let videoInput = try AVCaptureDeviceInput(device: device)
 
         // Set the input device on the capture session.
         let captureSession = AVCaptureSession()
@@ -68,7 +80,7 @@ class ResizableView: UIView {
         captureSession.addOutput(captureMetadataOutput)
 
         // Set delegate and use the default dispatch queue to execute the call back
-        captureMetadataOutput.setMetadataObjectsDelegate(delegate, queue: DispatchQueue.main)
+        captureMetadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
         captureMetadataOutput.metadataObjectTypes = objectTypes
 
         // Initialize the video preview layer and add it as a sublayer to the viewPreview view's layer.
@@ -76,8 +88,8 @@ class ResizableView: UIView {
         previewLayer.videoGravity = .resizeAspectFill
         previewLayer.frame = frame
         layer.addSublayer(previewLayer)
-        
-        self.captureSession = captureSession
+
+        return captureSession
     }
     
     func startRunning() {
@@ -91,67 +103,77 @@ class ResizableView: UIView {
     }
 }
 
-struct QRScannerView: UIViewRepresentable {
-    @Binding private(set) var state: ScanningState
-    private let objectTypes: [AVMetadataObject.ObjectType]
+extension QRScannerRepresentableView: AVCaptureMetadataOutputObjectsDelegate {
     
-    init(state: Binding<ScanningState>, objectTypes: [AVMetadataObject.ObjectType]) {
-        self._state = state
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        // Check if the metadataObjects array is not nil and it contains at least one object.
+        if metadataObjects.count == 0 {
+            return result(.scanning)
+        }
+
+        // Get the metadata objects.
+        guard let objects = metadataObjects as? [AVMetadataMachineReadableCodeObject] else {
+            return
+        }
+
+        // Get value of specified types
+        for object in objects {
+            if objectTypes.contains(object.type), let content = object.stringValue {
+                if isValid(content) {
+                    AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+                    result(.scannedQr(content))
+                    
+                    // Optionally, stop scanning after first detection
+                    captureSession?.stopRunning()
+                } else {
+                    result(.unknownQr)
+                }
+            }
+        }
+    }
+}
+
+struct QRScannerView: UIViewRepresentable {
+    private let objectTypes: [AVMetadataObject.ObjectType]
+    private let isValid:(String) -> Bool
+    private let result: (ScanningState) -> Void
+    
+    init(
+        state: Binding<ScanningState>,
+        objectTypes: [AVMetadataObject.ObjectType] = [.qr],
+        isValid: @escaping (String) -> Bool,
+        result: @escaping (ScanningState) -> Void
+    ) {
         self.objectTypes = objectTypes
+        self.isValid = isValid
+        self.result = result
     }
 
     func makeUIView(context: Context) -> UIView {
-        let myVuew = ResizableView(objectTypes: objectTypes, delegate: context.coordinator)
-        
+        let view = QRScannerRepresentableView(
+            objectTypes: objectTypes,
+            isValid: isValid,
+            result: result
+        )
         do throws(ScanningError) {
-            try myVuew.setupSession()
-            myVuew.startRunning()
+            try view.setupSession()
+            view.startRunning()
+            result(.scanning)
         } catch {
-            state = .error(error)
+            result(.error(error.localizedDescription))
         }
-        return myVuew
+        return view
     }
     
     func updateUIView(_ uiViewController: UIView, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(self)
+        Coordinator()
     }
-    
-    // 3. Implementing the Coordinator class
-    class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
-        private var parent: QRScannerView
-        
-        init(_ parent: QRScannerView) {
-            self.parent = parent
-        }
-        
-        func metadataOutput(
-            _ output: AVCaptureMetadataOutput,
-            didOutput metadataObjects: [AVMetadataObject],
-            from connection: AVCaptureConnection
-        ) {
-            print("NEW OUTPUT")
-            // Check if the metadataObjects array is not nil and it contains at least one object.
-            if metadataObjects.count == 0 {
-                parent.state = .loaded("No QR code detected")
-                return
-            }
 
-            // Get the metadata objects.
-            guard let results = metadataObjects as? [AVMetadataMachineReadableCodeObject] else { return }
-
-            // Get value of specified types
-            for value in results {
-                if parent.objectTypes.contains(value.type), let result = value.stringValue {
-                    Task {
-                        AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
-                        self.parent.state = .loaded(result)
-                    }
-                    // Optionally, stop scanning after first detection
-//                     self.parent.captureSession.stopRunning()
-                }
-            }
-        }
-    }
+    class Coordinator {}
 }

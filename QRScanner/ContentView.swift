@@ -4,7 +4,7 @@ import Foundation
 import AVFoundation
 
 struct QRScreen: View {
-    enum CameraPermissionStatus {
+    enum CameraPermissionStatus: Equatable {
         case undetermined
         case granted
         case denied
@@ -55,22 +55,16 @@ extension QRScreen {
         
         private func requestPermission() async {
             let status =  AVCaptureDevice.authorizationStatus(for: .video)
-            
             switch status {
             case .authorized:
-                print("CAMERA AUTHORISED")
                 permission = .granted
             case .notDetermined:
-                print("CAMERA NOT DETERMINED")
                 let isGranted = await AVCaptureDevice.requestAccess(for: .video)
                 permission = isGranted ? .granted : .denied
             case .denied, .restricted:
                 permission = .denied
-                print("CAMERA DENIED OR RESTRICTED")
-                
             @unknown default:
                 permission = .denied
-                print("CAMERA ACCESS UNKNOWN")
             }
         }
     }
@@ -78,32 +72,59 @@ extension QRScreen {
 
 extension QRScreen {
     struct ContentView: View {
+        @Environment(\.openURL) var openURL
         @State private var state: ScanningState = .undetermined
         @State private var isShowingScanner = true
-        @State private var scannedString: String = "Scanned your QR code"
+        @State private var isAlertPresented = false
         private let permission: CameraPermissionStatus
         private let event: (Event) -> Void
-        
+
         init(permission: CameraPermissionStatus, event: @escaping (Event) -> Void) {
             self.permission = permission
             self.event = event
         }
-        
+
         var body: some View {
             contentView
                 .onChange(of: state) { value in
                     switch value {
                     case .undetermined:
                         print("Capturing Undertermined")
-                    case let .loaded(result):
-                        print("Result Found")
-                        scannedString = result
+                    case .scanning:
+                        print("we are looking around to scan")
+                    case let .scannedQr(result):
+                        print("We found result:\(result)")
+                    case .unknownQr:
+                        print("We found an invalid QR")
                     case let .error(error):
-                        print(error.localizedDescription)
+                        print(error)
                     }
                 }
+                .onChange(of: permission) { value in
+                    isAlertPresented = value == .denied
+                    switch value {
+                    case .undetermined:
+                        print("CAMERA NOT DETERMINED")
+                    case .granted:
+                        print("CAMERA AUTHORISED")
+                    case .denied:
+                        print("CAMERA DENIED AND RESTRICTED")
+                    }
+                }
+                .alert("Allow Dojo to access your camera", isPresented: $isAlertPresented) {
+                    Button("Cancel", role: .cancel) {
+                        // close flow
+                    }
+                    Button("Go to settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        }
+                    }
+                } message: {
+                    Text("To use this feature, you’ll need to allow the Dojo app to access your camera from your device Settings.")
+                }
         }
-        
+
         @ViewBuilder
         var contentView: some View {
             VStack {
@@ -123,48 +144,83 @@ extension QRScreen {
                 case .denied:
                     Rectangle()
                         .fill(Color.black)
+                    // add alert
                 }
-                VStack(alignment: .center, spacing: 8) {
-                    Text("Scan QR code")
-                        .font(.title3)
-                        .fontWeight(.bold)
-                    Text("Scan the QR code appearing on the card machine to activate it. Make sure you’re logged in to the correct account.")
-                        .multilineTextAlignment(.center)
-                        .font(.headline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(Color.gray)
-                }
-                .background(Color.white)
-                .padding(.horizontal, 16)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .frame(height: 209)
+                
+                bottomView
             }
         }
-        
+
         @ViewBuilder
         var scanningContentView: some View {
             ZStack(alignment: .bottom) {
-                QRScannerView(state: $state, objectTypes: [.qr])
+                QRScannerView(
+                    state: $state,
+                    objectTypes: [.qr],
+                    isValid: {
+                        $0 == "https://account.dojo.tech/card-machine-activation"
+                    }
+                ) { result in
+                    Task {
+                        state = result
+                    }
+                }
                 ZStack(alignment: .center) {
                     Rectangle() // destination
-                        .fill(Color.red.opacity(0.3))
-                    RoundedRectangle(cornerRadius: 25) // source
+                        .fill(Color.black.opacity(0.3))
+                    RoundedRectangle(cornerRadius: 25)
                         .frame(width: 279, height: 269)
                         .blendMode(.destinationOut)
                     Image("corners")
                         .resizable()
                         .renderingMode(.template)
-//                        .aspectRatio(contentMode: .fit)
+                        .foregroundStyle(roundedEdgesColor)
                         .frame(width: 280, height: 270)
                 }
                 .compositingGroup()
-                .foregroundStyle(Color.white)
+                .animation(.easeInOut, value: roundedEdgesColor)
                 
-                Text(scannedString)
+                footnoteView
+                    .animation(.easeInOut, value: state)
+            }
+        }
+        
+        @ViewBuilder
+        private var footnoteView: some View {
+            if state == .unknownQr {
+                Text("Scan a Dojo card machine QR code")
                     .padding()
                     .background(.ultraThinMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .padding()
+            }
+        }
+        
+        @ViewBuilder
+        private var bottomView: some View {
+            VStack(alignment: .center, spacing: 8) {
+                Text("Scan QR code")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Scan the QR code appearing on the card machine to activate it. Make sure you’re logged in to the correct account.")
+                    .multilineTextAlignment(.center)
+                    .font(.headline)
+                    .fontWeight(.medium)
+                    .foregroundStyle(Color.gray)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(height: 209)
+        }
+
+        private var roundedEdgesColor: Color {
+            switch state {
+            case .undetermined, .scanning:
+                return .white
+            case .scannedQr:
+                return .green
+            case .unknownQr, .error:
+                return .red
             }
         }
     }
