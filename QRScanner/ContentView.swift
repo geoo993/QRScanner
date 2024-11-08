@@ -74,7 +74,6 @@ extension QRScreen {
     struct ContentView: View {
         @Environment(\.openURL) var openURL
         @State private var state: ScanningState = .undetermined
-        @State private var isShowingScanner = true
         @State private var isAlertPresented = false
         private let permission: CameraPermissionStatus
         private let event: (Event) -> Void
@@ -161,9 +160,7 @@ extension QRScreen {
                         $0 == "https://account.dojo.tech/card-machine-activation"
                     }
                 ) { result in
-                    Task {
-                        state = result
-                    }
+                    state = result
                 }
                 ZStack(alignment: .center) {
                     Rectangle() // destination
